@@ -1,16 +1,27 @@
 // ============================================================
-//  Jenkinsfile — Simple Terraform Pipeline
-//  Runs Init → Plan → Apply for DEV, UAT, and PROD
+//  Jenkinsfile — Terraform Pipeline with Environment Choice
+//  Select ENV → Init → Plan → Approve → Apply
 // ============================================================
 
 pipeline {
 
     agent any
 
+    // ── Parameter: pick ONE environment per run ───────────────
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'uat', 'prod'],
+            description: 'Select the environment to run Terraform against'
+        )
+    }
+
     environment {
-    //    AWS_ACCESS_KEY_ID     = credentials('aws-access-key-id')
-    //    AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
+       // AWS_ACCESS_KEY_ID     = credentials('aws-access-key-id')
+       // AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
         AWS_DEFAULT_REGION    = 'us-east-1'
+        TF_VAR_FILE           = "envs/${params.ENVIRONMENT}.tfvars"
+        TF_PLAN_FILE          = "tfplan-${params.ENVIRONMENT}"
     }
 
     stages {
@@ -19,111 +30,77 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
+                echo "Running pipeline for environment: ${params.ENVIRONMENT}"
             }
         }
 
-        // ══════════════════════════════════════════════════════
-        //  DEV
-        // ══════════════════════════════════════════════════════
-        stage('DEV - Terraform Init') {
+        // ── Terraform Init ────────────────────────────────────
+        stage('Terraform Init') {
             steps {
-                sh '''
-                    echo "==> Initialising for DEV"
+                sh """
+                    echo "==> Terraform Init [ ${params.ENVIRONMENT} ]"
                     terraform init -reconfigure -input=false
-                    terraform workspace select dev || terraform workspace new dev
-                '''
+                    terraform workspace select ${params.ENVIRONMENT} || \
+                        terraform workspace new ${params.ENVIRONMENT}
+                    echo "Active workspace: \$(terraform workspace show)"
+                """
             }
         }
 
-        stage('DEV - Terraform Plan') {
+        // ── Terraform Plan ────────────────────────────────────
+        stage('Terraform Plan') {
             steps {
-                sh '''
-                    echo "==> Planning for DEV"
-                    terraform plan -var-file="envs/dev.tfvars" -out="tfplan-dev" -input=false
-                '''
+                sh """
+                    echo "==> Terraform Plan [ ${params.ENVIRONMENT} ]"
+                    terraform plan \
+                        -var-file="${env.TF_VAR_FILE}" \
+                        -out="${env.TF_PLAN_FILE}" \
+                        -input=false
+                """
+            }
+            post {
+                always {
+                    // Save human-readable plan as a build artifact
+                    sh """
+                        terraform show -no-color "${env.TF_PLAN_FILE}" \
+                            > "${env.TF_PLAN_FILE}.txt" 2>/dev/null || true
+                    """
+                    archiveArtifacts artifacts: "tfplan-${params.ENVIRONMENT}.txt",
+                                     allowEmptyArchive: true
+                }
             }
         }
 
-        stage('DEV - Terraform Apply') {
+        // ── Approval Gate ─────────────────────────────────────
+        stage('Approval') {
             steps {
-                sh '''
-                    echo "==> Applying for DEV"
-                    terraform destroy -input=false -auto-approve "tfplan-dev"
-                '''
+                script {
+                    def msg = params.ENVIRONMENT == 'prod'
+                        ? "PRODUCTION deployment — are you sure?"
+                        : "Approve Apply for ${params.ENVIRONMENT.toUpperCase()}?"
+
+                    input message: msg, ok: "Yes, Apply ${params.ENVIRONMENT.toUpperCase()}"
+                }
             }
         }
 
-        // ══════════════════════════════════════════════════════
-        //  UAT
-        // ══════════════════════════════════════════════════════
-        stage('UAT - Terraform Init') {
+        // ── Terraform Apply ───────────────────────────────────
+        stage('Terraform Apply') {
             steps {
-                sh '''
-                    echo "==> Initialising for UAT"
-                    terraform init -reconfigure -input=false
-                    terraform workspace select uat || terraform workspace new uat
-                '''
+                sh """
+                    echo "==> Terraform Apply [ ${params.ENVIRONMENT} ]"
+                    terraform apply -input=false -auto-approve "${env.TF_PLAN_FILE}"
+                """
             }
         }
 
-        stage('UAT - Terraform Plan') {
+        // ── Show Outputs ──────────────────────────────────────
+        stage('Terraform Output') {
             steps {
-                sh '''
-                    echo "==> Planning for UAT"
-                    terraform plan -var-file="envs/uat.tfvars" -out="tfplan-uat" -input=false
-                '''
-            }
-        }
-
-        stage('UAT - Approval') {
-            steps {
-                input message: 'Approve UAT deployment?', ok: 'Deploy to UAT'
-            }
-        }
-
-        stage('UAT - Terraform Apply') {
-            steps {
-                sh '''
-                    echo "==> Applying for UAT"
-                    terraform apply -input=false -auto-approve "tfplan-uat"
-                '''
-            }
-        }
-
-        // ══════════════════════════════════════════════════════
-        //  PROD
-        // ══════════════════════════════════════════════════════
-        stage('PROD - Terraform Init') {
-            steps {
-                sh '''
-                    echo "==> Initialising for PROD"
-                    terraform init -reconfigure -input=false
-                    terraform workspace select prod || terraform workspace new prod
-                '''
-            }
-        }
-
-        stage('PROD - Terraform Plan') {
-            steps {
-                sh '''
-                    echo "==> Planning for PROD"
-                    terraform plan -var-file="envs/prod.tfvars" -out="tfplan-prod" -input=false
-                '''
-            }
-        }
-
-        stage('PROD - Approval') {
-            steps {
-                input message: 'Approve PROD deployment?', ok: 'Deploy to PROD'
-            }
-        }
-
-        stage('PROD - Terraform Apply') {
-            steps {
-                sh '''
-                    echo "==> Applying for PROD"
-                    terraform apply -input=false -auto-approve "tfplan-prod"
-                '''
+                sh """
+                    echo "==> Outputs for ${params.ENVIRONMENT}"
+                    terraform output || true
+                """
             }
         }
 
@@ -131,13 +108,13 @@ pipeline {
 
     post {
         always {
-            sh 'rm -f tfplan-dev tfplan-uat tfplan-prod || true'
+            sh "rm -f ${env.TF_PLAN_FILE} || true"
         }
         success {
-            echo 'All environments deployed successfully!'
+            echo "✅ ${params.ENVIRONMENT.toUpperCase()} deployed successfully!"
         }
         failure {
-            echo 'Pipeline failed — check the logs above.'
+            echo "❌ Pipeline failed for ${params.ENVIRONMENT.toUpperCase()} — check logs."
         }
     }
 
