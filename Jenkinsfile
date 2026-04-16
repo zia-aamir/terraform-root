@@ -42,7 +42,7 @@ stages {
     stage('Terraform Action') {
         steps {
             script {
-                def tfvarsFile = "env/${params.ENV}.tfvars"
+                def tfvarsFile = "envs/${params.ENV}.tfvars"
 
                 if (params.ACTION == 'plan') {
                     echo "Running PLAN for ${params.ENV}"
