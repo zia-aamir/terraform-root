@@ -56,7 +56,7 @@ module "ec2_instances" {
 module "s3_bucket" {
   source = "git::https://github.com/ygminds73/terraform-module-s3.git"
 
-  bucket_name = "myapp-dev-assets-${var.environment}-${timestamp()}"
+  bucket_name = "myapp-dev-assets-${var.environment}-${replace(timestamp(), "[:TZ]", "-")}"
   environment = var.environment
   tags        = merge(local.common_tags, { Purpose = "storage" })
 }
